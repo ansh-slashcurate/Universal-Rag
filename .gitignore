@@ -1,0 +1,17 @@
+# pycache
+__pycache__/
+*.py[cod]
+
+
+.venv/
+venv/
+
+# extracted images folder
+extracted_images/
+uploads/
+local_models/
+
+.env
+.env.local
+image_metadata_index.txt
+image_metadata.json
