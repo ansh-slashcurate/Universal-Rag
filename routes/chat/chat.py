@@ -10,12 +10,14 @@ from llama_index.core.llms import ChatMessage
 from qdrant_client.models import Filter, FieldCondition, MatchValue, Prefetch,FusionQuery, Fusion, SparseVector
 from retrieval.hybrid_search import SPARSE_VECTOR_NAME
 from db.redis import upStash_chatStore
+from llama_index.core.chat_engine import CondensePlusContextChatEngine
+from lib.chat_memory import get_chat_memory
+from lib.session import generate_session_id
+import uuid
+from llama_index.core.retrievers import BaseRetriever
+from llama_index.core.schema import NodeWithScore, TextNode
 
 from utils import COLLECTION_NAME
-# from prompts.rag_prompts import (
-#     SYSTEM_PROMPT,
-#     HUMAN_PROMPT_TEMPLATE,
-# )
 import time
 
 import hashlib
@@ -31,16 +33,16 @@ MAX_REWRITE_HISTORY_MESSAGES = 6
 
 class ChatRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=5000)
-    topic: str | None = Field(default=None, max_length=500)
-
+    session_id: str = None
 
 class ChatResponse(BaseModel):
     query: str
     context: List[str]
     response: str
+    session_id: str
 
 # calling the prompts here from yaml file here we change the versions
-with open("prompts/versions/v2.yaml", "r", encoding="utf-8") as f:
+with open("prompts/versions/v3.yaml", "r", encoding="utf-8") as f:
     prompt_config = yaml.safe_load(f)
 
 SYSTEM_PROMPT = prompt_config["system_prompt"]
@@ -130,23 +132,26 @@ def rerank_chunks(query, chunks, top_k=10):
 
     return top_chunks
 
-@router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    try:
-        start = time.perf_counter()
-        print(f"Chat request received: {request.query}")
+class QdrantHybridCustomRetriever(BaseRetriever):
+    def __init__(self, collectionName:str, search_limit:int):
+        self._collectionName = collectionName
+        self._search_limit = search_limit
 
-        
+        super().__init__()
+
+    def _retrieve(self, query_bundle) -> List[NodeWithScore]:
+        query_str = query_bundle.query_str  
+
         # Generate embedding for dense search
         query_embedding = model_manager.embedding_model.encode(
-            request.query,
+            query_str,
             normalize_embeddings=True
         ).tolist()
         print("Embedding generated")
 
         #Generate embedding for sparse search
         query_sparse = list(
-            model_manager.sparse_embedding.embed([request.query])
+            model_manager.sparse_embedding.embed([query_str])
         )[0]
 
         print("type of query", type(query_embedding))
@@ -169,7 +174,7 @@ async def chat(request: ChatRequest):
 
         # Search Qdrant
         search_result = qdrant_client.query_points(
-            collection_name=COLLECTION_NAME,
+            collection_name=self._collectionName,
             query =FusionQuery(
                 fusion = Fusion.RRF
             ) ,
@@ -177,11 +182,54 @@ async def chat(request: ChatRequest):
                 dense_prefetch,
                 sparse_prefetch
             ],
-            limit=SEARCH_LIMIT,
+            limit=self._search_limit,
             with_payload=True
         )
         print(f"Found {len(search_result.points)} search results")
-     
+
+        nodes =[]
+        seen_hash_text = set()
+
+        for point in search_result.points:
+            payload = point.payload or {}
+            text = payload.get("text")
+
+            if not text:
+                continue
+
+            hash_text = hashlib.md5(text.encode("utf-8")).hexdigest()
+            if hash_text in seen_hash_text:
+                continue
+
+            seen_hash_text.add(hash_text)
+
+            node = TextNode(
+                text = text,
+                metadata = {
+                    "page": payload.get("page", 0),
+                    "chunk_index": payload.get("chunk_index", 0),
+                    "doc_id": payload.get("doc_id", "")
+                }
+            ) 
+
+            nodes.append(NodeWithScore(node = node, score=point.score or 0.0))
+        return nodes    
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    try:
+        start = time.perf_counter()
+        print(f"Chat request received: {request.query}")
+
+
+        session_id = request.session_id
+        if not session_id:
+            session_id = generate_session_id(None)
+            if not session_id:
+                session_id = str(uuid.uuid4())
+        memory = get_chat_memory(session_id)
+
 
         # collecting info of vector db
         collect_info = qdrant_client.count(
@@ -191,89 +239,61 @@ async def chat(request: ChatRequest):
 
         print("collection info", collect_info)
 
-        candidate_chunks = []
-        seen_hash_text = set()
+        custom_retriver = QdrantHybridCustomRetriever(COLLECTION_NAME, SEARCH_LIMIT)
 
-        for point in search_result.points:
-            print("Point Id", point.id)
-            payload = point.payload or {}
-            text = payload.get("text")
-
-            if not text:
-                continue
-
-            hash_text = hashlib.md5(text.encode("utf-8")).hexdigest()
-
-            if hash_text in seen_hash_text:
-                continue
-
-            seen_hash_text.add(hash_text)
-            candidate_chunks.append(
-                    {
-                        "text": text,
-                        "vector_score": point.score,
-                        "page": payload.get("page", 0),
-                        "chunk_index": payload.get("chunk_index", 0),
-                        "doc_id": payload.get("doc_id", "")
-                    }
-                )
-            
-     
-        print(f"Candidate chunks: {len(candidate_chunks)}")
-        for candidate in candidate_chunks:
-            preview = candidate["text"].replace("\n", " ")[:180]
-            print(
-                "Candidate "
-                f"doc={candidate['doc_id']} "
-                f"page={candidate['page']} "
-                f"chunk={candidate['chunk_index']} "
-                f"score={candidate['vector_score']} "
-                f"text={preview}"
-            )
+        retriver = custom_retriver.retrieve(request.query)
 
         retrieved_chunks = [
-                chunk["text"]
-                for chunk in candidate_chunks
-            ]
+            node.node.text for node in retriver
+        ]
         
         # Reranker disabled for now. Use Qdrant's hybrid RRF ordering directly.
         # reranked_chunks = rerank_chunks(request.query, retrieved_chunks, top_k=RERANK_TOP_K)
-        context_chunks = fit_chunks_to_context_budget(retrieved_chunks)
+        # context_chunks = fit_chunks_to_context_budget(retrieved_chunks)
 
-        print("Reranker disabled; using hybrid search order directly")
-        print("Context chunks after budget:", len(context_chunks))
+        # print("Context chunks after budget:", len(context_chunks))
 
      
 
-        context_text = build_context(context_chunks)
+        context_text = build_context(retrieved_chunks)
 
         print("==========CONTEXT SENT TO LLM========")
         print(f"Context Length: {len(context_text)}")
         # can also print context text for deebugging here
 
         
-        topic_context = (
-            f"\n\nCurrent discussion topic: {request.topic.strip()}"
-            if request.topic and request.topic.strip()
-            else ""
+
+        # Creating CondensePlusContextChatEngine for having context of querys
+        condense_chat_engine = CondensePlusContextChatEngine.from_defaults(
+            retriever = custom_retriver,
+            memory = memory,
+            llm = google_llm,
+            system_prompt = SYSTEM_PROMPT,
+            context_prompt = USER_PROMPT.replace(
+                "{context}", "{context_text}"
+            ).replace(
+                "{query}", "{query_str}"
+            ),
+            verbose = False
         )
 
         
-        message = [
-            ChatMessage(
-                role="system",
-                content=SYSTEM_PROMPT 
-            ),
-            ChatMessage(
-                role="user",
-                content=USER_PROMPT.format(
-                    context=context_text, 
-                    query=request.query
-                )
-            )    
-        ]
+        # message = [
+        #     ChatMessage(
+        #         role="system",
+        #         content=SYSTEM_PROMPT 
+        #     ),
+            
+        #     ChatMessage(
+        #         role="user",
+        #         content=USER_PROMPT.format(
+        #             context=context_text, 
+        #             query=request.query
+        #         )
+        #     )    
+        # ]
 
-        print("Messages prepared for LLM")
+        # print("Messages prepared for LLM")
 
         # Watsonx API Call
         try:
@@ -282,13 +302,9 @@ async def chat(request: ChatRequest):
             #     temperature = 0.3
             # )
 
-            response =await google_llm.achat(
-                message,
-                temperature = 0.3
-            )
+            response =await condense_chat_engine.achat(request.query)
             
             print("Response raw:", response)
-            print("======"*50,response)
 
                         
             # Extract text from response - handle different response formats
@@ -329,11 +345,12 @@ async def chat(request: ChatRequest):
         
         end = time.perf_counter()
 
-        print(f"Execution time in chat route: {end - start:.6f} seconds")
+        print(f"==========Execution time in chat route: {end - start:.6f} seconds=========")
         return ChatResponse(
             query=request.query,
-            context=context_chunks,
+            context=retrieved_chunks,
             response=llm_response_text,
+            session_id= session_id
         )
     
 

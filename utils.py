@@ -1,4 +1,4 @@
-COLLECTION_NAME = "dense_hybride_search_3"
+COLLECTION_NAME = "dense_hybride_search_4"
 
 # Allowed MIME types
 ALLOWED_MIME_TYPES = [

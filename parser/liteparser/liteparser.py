@@ -1,5 +1,6 @@
 from liteparse import LiteParse
 
+
 parser = LiteParse(
     ocr_enabled=True,              # Enable OCR (default: True)
     ocr_language="eng",            # Tesseract language code
@@ -11,6 +12,9 @@ parser = LiteParse(
     password=None,                 # Password for protected documents
     quiet=False,                   # Suppress progress output
     num_workers=4,                 # Concurrent OCR workers
+    output_format = "markdown",
+    image_mode ="placeholder",
+    extract_links = True
     
 )
 

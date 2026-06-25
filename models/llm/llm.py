@@ -3,6 +3,8 @@ import json
 from dotenv import load_dotenv
 from llama_index.llms.ibm import WatsonxLLM
 from llama_index.llms.google_genai import GoogleGenAI
+from ibm_watsonx_ai.metanames import GenTextParamsMetaNames
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -23,11 +25,7 @@ if not url:
 if not project_id:
     raise ValueError("WATSONX_PROJECT_ID environment variable is not set")
 
-# Parse parameters
-try:
-    params = json.loads(params_str)
-except:
-    params = {"decoding_method": "greedy"}
+
 
 # Initialize Watsonx LLM
 watsonx_llm = WatsonxLLM(
@@ -35,7 +33,11 @@ watsonx_llm = WatsonxLLM(
     ibm_cloud_api_key=api_key,
     ibm_cloud_url=url,
     project_id=project_id,
-    # **params
+    temperature = 0.3,
+    max_new_tokens = 2000,
+    additional_prams = {
+        GenTextParamsMetaNames.DECODING_METHOD: "sample"
+    }
 )
 
 google_llm = GoogleGenAI(

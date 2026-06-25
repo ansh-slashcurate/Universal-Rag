@@ -17,10 +17,8 @@ from llama_index.core.node_parser import (
 from models.embedding.emb_model import model_manager
 from utils import COLLECTION_NAME
 from db.db_client import qdrant_client
-
 from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType, SparseVector
 from parser.jsonReader.jsonReader import json_reader
-
 from utils import (
     ALLOWED_MIME_TYPES,
     JSON_MIME_TYPES,
@@ -29,6 +27,12 @@ from utils import (
 )
 from retrieval.hybrid_search import SPARSE_VECTOR_NAME
 import time
+from parser.liteparser.render_pages import render_pages, is_table_chunk, blocks_to_markdown
+from parser.liteparser.paddleStructure import PageBlock
+from parser.liteparser.processTablePage import process_table_page
+import re
+
+
 
 router = APIRouter()
 
@@ -194,8 +198,65 @@ async def upload_file(files: list[UploadFile] = File(...)):
 
             # --- ROUTE A: Standard Document Handling & Visual Layouts ---
             if mime_type in ALLOWED_MIME_TYPES:
+
+                # calling liteparser for parsing
+
                 parsed_result = lite_parser(file_location)
+
                 parsed_pages = parsed_result if isinstance(parsed_result, list) else [parsed_result]
+
+                # calling paddle structure for structuring table by checking if markdown actually consist 
+                # it and then join the metadata
+
+                render_page_image = render_pages(file_location, dpi=200)
+                print("rednder page done")
+
+                blocks : list[PageBlock] = []
+                print("block is created")
+
+                for page_num, (page_image, page_text_obj) in enumerate(
+                    zip(render_page_image, parsed_pages)
+                ):
+                    if hasattr(page_text_obj, "text"):
+                        page_text = page_text_obj.text
+                    elif hasattr(page_text_obj, "get_content"):
+                        page_text = page_text_obj.get_content()
+                    else:
+                        # Fallback to string casting if it's a basic wrapper
+                        page_text = str(page_text_obj)
+    
+                    if(is_table_chunk(page_text, 3)):
+                        block = process_table_page(
+                            page_num=page_num,
+                            page_img=page_image,
+                            fallback_text=page_text,
+                            lang="en"
+                        )
+
+                        print("has table chunk")
+                    else:
+                        block = PageBlock(
+                            page_num=page_num,
+                            block_type="text",
+                            content=page_text
+                        )
+
+                        print("dont have table chunk")
+
+                    blocks.append(block)        
+                print("added to block")
+                print("="*50)
+                print(type(blocks))
+                print("blocks", blocks)
+                get_markdown_text = blocks_to_markdown(blocks)
+                
+                page_chunks = re.split(r'',get_markdown_text)
+                page_chunk  = [chunk.strip() for chunk in page_chunks if chunk.strip()]
+
+                print("="*100)
+                print(get_markdown_text)
+
+
 
                 # Run metadata image extraction layers strictly on PDF instances
                 if mime_type == "application/pdf":
@@ -206,8 +267,9 @@ async def upload_file(files: list[UploadFile] = File(...)):
                         page_images[page_number].append(metadata_to_text(image_metadata))
 
                 # Build Document contexts from the layout engine results
-                for page_num, page in enumerate(parsed_pages, start=1):
-                    page_text = page.text or ""
+                print("reach at build document")
+                for page_num, page in enumerate(blocks, start=1):
+                    page_text = page.content or ""
                     associated_images = page_images.get(page_num, [])
 
                     if associated_images:
@@ -243,6 +305,9 @@ async def upload_file(files: list[UploadFile] = File(...)):
                     nodes = hierarchical_node_parser.get_nodes_from_documents(documents)
                     leaf_nodes = get_leaf_nodes(nodes)
 
+                    print("="*100)
+                    print("leaf_nodes",leaf_nodes)
+
             # --- ROUTE B: Structured Core JSON Processing ---
             elif mime_type in JSON_MIME_TYPES:
                 print("Compiler is at else josn code")
@@ -263,15 +328,7 @@ async def upload_file(files: list[UploadFile] = File(...)):
                     node.metadata.setdefault("page", 1)
                     node.metadata.setdefault("source_type", "structured_json")
 
-            #chicking the keyword in leaf_node
-            keyword = "column temperature"
-
-            for node in leaf_nodes:
-                if keyword.lower() in node.text.lower():
-                    print("found the keyword")
-                    print(node.text)
-                else:
-                    print("Keyword not found")     
+                
             # --- VECTOR PIPELINE LAYER ---
             embedding_records = []
             for chunk_index, node in enumerate(leaf_nodes):
@@ -379,6 +436,7 @@ async def upload_file(files: list[UploadFile] = File(...)):
     except HTTPException:
         raise
     except Exception as e:
+        print("Exception ",e)
         raise HTTPException(
             status_code=500,
             detail=f"Failed to process and index upload sequence: {str(e)}",
