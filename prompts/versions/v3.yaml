@@ -107,8 +107,10 @@ user_prompt: |
   {query}
 
   Instructions:
-  - If relevant information exists in the context, always provide a complete answer.
-  - Output all available content in full — do not shorten, summarize, or stop early unless the user asks.
+  - Answer the question precisely based on the provided context.
+  - Dynamically adjust the length, level of detail, and formatting of your response to fit the user's question:
+    * If the user asks a simple, direct question or requests a brief/precise answer, keep the response concise, short, and to the point.
+    * If the user asks a complex question, requests a detailed explanation, or asks for procedures/steps, provide a comprehensive, complete response.
   - When steps are present, output every step in their original sequence from first to last.
   - Combine content from across context sections when it belongs to the same answer.
   - If retrieved information is partial or incomplete, clearly indicate this in your response.

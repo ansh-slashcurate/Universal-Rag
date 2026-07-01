@@ -1,5 +1,5 @@
 from liteparse import LiteParse
-
+from docling.document_converter import DocumentConverter
 
 parser = LiteParse(
     ocr_enabled=True,              # Enable OCR (default: True)
@@ -18,6 +18,8 @@ parser = LiteParse(
     
 )
 
+converter = DocumentConverter()
+
 def lite_parser(file: str):
     """
     This function takes a file as input and returns the parsed content using LiteParse.
@@ -27,6 +29,13 @@ def lite_parser(file: str):
         return parsed_content
     except Exception as e:
         raise Exception(f"Failed to parse file: {str(e)}")  
+
+def dockling_parser(file:str):
+    try:
+        document = converter.convert(file)
+        return document.document
+    except Exception as e:
+        raise Exception(f"Failed to parse file using docling: {str(e)}") 
 
 
     

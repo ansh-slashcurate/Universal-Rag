@@ -270,30 +270,13 @@ async def chat(request: ChatRequest):
             llm = google_llm,
             system_prompt = SYSTEM_PROMPT,
             context_prompt = USER_PROMPT.replace(
-                "{context}", "{context_text}"
+                "{context}", "{context_str}"
             ).replace(
                 "{query}", "{query_str}"
             ),
             verbose = False
         )
 
-        
-        # message = [
-        #     ChatMessage(
-        #         role="system",
-        #         content=SYSTEM_PROMPT 
-        #     ),
-            
-        #     ChatMessage(
-        #         role="user",
-        #         content=USER_PROMPT.format(
-        #             context=context_text, 
-        #             query=request.query
-        #         )
-        #     )    
-        # ]
-
-        # print("Messages prepared for LLM")
 
         # Watsonx API Call
         try:
@@ -335,7 +318,7 @@ async def chat(request: ChatRequest):
             if not llm_response_text or llm_response_text.strip() == "" or llm_response_text == "None":
                   llm_response_text = "The LLM completed execution successfully but emitted a null token stream due to prompt constraints."
 
-            print(f"--- Sending Output Response to Client --- \n{llm_response_text[:100]}...")   
+            print("output token length", len(llm_response_text))      
         except Exception as llm_error:
             print(f"LLM Error: {str(llm_error)}")
             raise HTTPException(

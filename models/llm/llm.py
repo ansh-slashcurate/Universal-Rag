@@ -42,7 +42,11 @@ watsonx_llm = WatsonxLLM(
 
 google_llm = GoogleGenAI(
     model="gemini-2.5-flash",
-    api_key=api_key
+    api_key=api_key,
+    temperature= 0.3,
+    context_window=1000000,
+    max_new_tokens=3000,
+    top_k=10
 )
 
 # res = watsonx_llm.complete("Give me hi reply")

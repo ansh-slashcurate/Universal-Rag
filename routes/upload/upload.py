@@ -3,7 +3,7 @@ import uuid
 import magic
 import hashlib
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from parser.liteparser.liteparser import lite_parser
+from parser.liteparser.liteparser import lite_parser, dockling_parser
 from parser.pyMupdf.extract_metadataV2 import (
     extract_image_metadata,
     metadata_to_text,
@@ -12,7 +12,7 @@ from llama_index.core import Document
 from llama_index.core.node_parser import (
     HierarchicalNodeParser,
     get_leaf_nodes,
-    JSONNodeParser as LlamaJSONNodeParser
+    JSONNodeParser as LlamaJSONNodeParser,
 )
 from models.embedding.emb_model import model_manager
 from utils import COLLECTION_NAME
@@ -27,11 +27,10 @@ from utils import (
 )
 from retrieval.hybrid_search import SPARSE_VECTOR_NAME
 import time
-from parser.liteparser.render_pages import render_pages, is_table_chunk, blocks_to_markdown
+from parser.liteparser.render_pages import blocks_to_markdown  # render_pages, is_table_chunk commented out
 from parser.liteparser.paddleStructure import PageBlock
-from parser.liteparser.processTablePage import process_table_page
+# from parser.liteparser.processTablePage import process_table_page
 import re
-
 
 
 router = APIRouter()
@@ -175,22 +174,22 @@ async def upload_file(files: list[UploadFile] = File(...)):
                     ),
                 )
 
-            cached_file = get_cached_file_info(file_hash)
-            if cached_file:
-                upload_results.append(
-                    {
-                        "filename": display_filename,
-                        "pages": 0,
-                        "image_metadata": 0,
-                        "chunks": cached_file["chunks"],
-                        "vectors": cached_file["chunks"],
-                        "status": "done",
-                        "cached": True,
-                        "file_hash": file_hash,
-                    }
-                )
-                print(f"Cache hit for {display_filename}; already indexed as {cached_file.get('doc_id')}")
-                continue
+            # cached_file = get_cached_file_info(file_hash)
+            # if cached_file:
+            #     upload_results.append(
+            #         {
+            #             "filename": display_filename,
+            #             "pages": 0,
+            #             "image_metadata": 0,
+            #             "chunks": cached_file["chunks"],
+            #             "vectors": cached_file["chunks"],
+            #             "status": "done",
+            #             "cached": True,
+            #             "file_hash": file_hash,
+            #         }
+            #     )
+            #     print(f"Cache hit for {display_filename}; already indexed as {cached_file.get('doc_id')}")
+            #     continue
 
             # Write only uncached files for parsers that require a local path.
             with open(file_location, "wb") as f:
@@ -199,66 +198,11 @@ async def upload_file(files: list[UploadFile] = File(...)):
             # --- ROUTE A: Standard Document Handling & Visual Layouts ---
             if mime_type in ALLOWED_MIME_TYPES:
 
-                # calling liteparser for parsing
-
-                parsed_result = lite_parser(file_location)
-
-                parsed_pages = parsed_result if isinstance(parsed_result, list) else [parsed_result]
-
-                # calling paddle structure for structuring table by checking if markdown actually consist 
-                # it and then join the metadata
-
-                render_page_image = render_pages(file_location, dpi=200)
-                print("rednder page done")
-
-                blocks : list[PageBlock] = []
-                print("block is created")
-
-                for page_num, (page_image, page_text_obj) in enumerate(
-                    zip(render_page_image, parsed_pages)
-                ):
-                    if hasattr(page_text_obj, "text"):
-                        page_text = page_text_obj.text
-                    elif hasattr(page_text_obj, "get_content"):
-                        page_text = page_text_obj.get_content()
-                    else:
-                        # Fallback to string casting if it's a basic wrapper
-                        page_text = str(page_text_obj)
-    
-                    if(is_table_chunk(page_text, 3)):
-                        block = process_table_page(
-                            page_num=page_num,
-                            page_img=page_image,
-                            fallback_text=page_text,
-                            lang="en"
-                        )
-
-                        print("has table chunk")
-                    else:
-                        block = PageBlock(
-                            page_num=page_num,
-                            block_type="text",
-                            content=page_text
-                        )
-
-                        print("dont have table chunk")
-
-                    blocks.append(block)        
-                print("added to block")
-                print("="*50)
-                print(type(blocks))
-                print("blocks", blocks)
-                get_markdown_text = blocks_to_markdown(blocks)
-                
-                page_chunks = re.split(r'',get_markdown_text)
-                page_chunk  = [chunk.strip() for chunk in page_chunks if chunk.strip()]
-
-                print("="*100)
-                print(get_markdown_text)
-
-
+                # calling docling parser for parsing
+                parsed_result = dockling_parser(file_location)
 
                 # Run metadata image extraction layers strictly on PDF instances
+                # WARNING: Do not remove or touch the extract_metadata code
                 if mime_type == "application/pdf":
                     image_metadata_entries = extract_image_metadata(file_location)
                     for image_metadata in image_metadata_entries:
@@ -266,12 +210,20 @@ async def upload_file(files: list[UploadFile] = File(...)):
                         page_images.setdefault(page_number, [])
                         page_images[page_number].append(metadata_to_text(image_metadata))
 
-                # Build Document contexts from the layout engine results
-                print("reach at build document")
-                for page_num, page in enumerate(blocks, start=1):
-                    page_text = page.content or ""
-                    associated_images = page_images.get(page_num, [])
+                # Build Document contexts page-by-page directly from Docling result
+                num_pages = len(parsed_result.pages) if (hasattr(parsed_result, "pages") and parsed_result.pages) else 1
+                for page_num in range(1, num_pages + 1):
+                    try:
+                        # docling's export_to_markdown has native layout and table formatting.
+                        # image_mode="placeholder" keeps it lightweight and clean.
+                        page_text = parsed_result.export_to_markdown(page_no=page_num, image_mode="placeholder")
+                        print("="*100)
+                        print("Parsed text", page_text)
+                    except Exception as e:
+                        print(f"Error exporting page {page_num} to markdown: {str(e)}")
+                        page_text = ""
 
+                    associated_images = page_images.get(page_num, [])
                     if associated_images:
                         page_text += "\n\n### ASSOCIATED DIAGRAM METADATA \n" + "\n\n".join(associated_images)
 
@@ -302,11 +254,14 @@ async def upload_file(files: list[UploadFile] = File(...)):
 
                 # Execute structural parent-child markdown splitting
                 if documents:
-                    nodes = hierarchical_node_parser.get_nodes_from_documents(documents)
-                    leaf_nodes = get_leaf_nodes(nodes)
 
-                    print("="*100)
-                    print("leaf_nodes",leaf_nodes)
+                    all_nodes = hierarchical_node_parser.get_nodes_from_documents(documents)
+                    print("+"*100)
+                    print("all node", all_nodes)
+                    leaf_nodes = get_leaf_nodes(all_nodes)
+
+                    print("+"*100)
+                    print("leaf node", leaf_nodes)
 
             # --- ROUTE B: Structured Core JSON Processing ---
             elif mime_type in JSON_MIME_TYPES:
@@ -417,7 +372,7 @@ async def upload_file(files: list[UploadFile] = File(...)):
             upload_results.append(
                 {
                     "filename": display_filename,
-                    "pages": len(parsed_pages) if parsed_pages else 1,
+                    "pages": len(parsed_result.pages) if parsed_result.pages else 1,
                     "image_metadata": len(image_metadata_entries),
                     "chunks": len(leaf_nodes),
                     "vectors": len(points),
